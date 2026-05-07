@@ -379,7 +379,7 @@
         </label>
         <label>
           Max frames per video
-          <input type="number" id="max-frames" value="200" min="1" step="1">
+          <input type="number" id="max-frames" value="360" min="1" step="1">
           <span class="hint">Safety cap on long videos</span>
         </label>
         <label class="checkbox">
@@ -512,7 +512,7 @@
           }
           for (var i = 0; i < videos.length; i++) {
             var fps = clamp(parseInt(videoFpsInput.value, 10) || 10, 1, 60);
-            var maxFrames = Math.max(1, parseInt(maxFramesInput.value, 10) || 200);
+            var maxFrames = Math.max(1, parseInt(maxFramesInput.value, 10) || 360);
             var extracted = await extractVideoFrames(videos[i], fps, maxFrames);
             frames = frames.concat(extracted);
             render();
