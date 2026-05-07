@@ -337,8 +337,8 @@
 
     <section id="dropzone" class="dropzone">
       <p><strong>Drop images or videos here</strong> or <button type="button" id="browse-btn" class="link-btn">browse</button></p>
-      <p class="hint">JPEG, PNG, or video (MP4, WebM, MOV…). Videos are sampled into frames.</p>
-      <input type="file" id="file-input" accept="image/jpeg,image/png,video/*" multiple hidden>
+      <p class="hint">JPEG, PNG, BMP, or video (MP4, WebM, MOV…). Videos are sampled into frames.</p>
+      <input type="file" id="file-input" accept="image/jpeg,image/png,image/bmp,image/x-ms-bmp,video/*" multiple hidden>
       <div id="extract-status" class="extract-status hidden">
         <div class="progress"><div id="extract-bar" class="progress-bar"></div></div>
         <span id="extract-text" class="hint"></span>
@@ -465,7 +465,7 @@
       var resultSize = document.getElementById('result-size');
       var downloadLink = document.getElementById('download-link');
 
-      var ACCEPTED_IMAGE = ['image/jpeg', 'image/png'];
+      var ACCEPTED_IMAGE = ['image/jpeg', 'image/png', 'image/bmp', 'image/x-ms-bmp'];
       var MAX_VIDEO_WIDTH = 720; // cap source resolution to keep memory in check
       var frames = [];
       var nextId = 1;
@@ -498,55 +498,102 @@
         if (e.dataTransfer && e.dataTransfer.files) addFiles(e.dataTransfer.files);
       });
 
+      function isAcceptedImage(file) {
+        if (ACCEPTED_IMAGE.indexOf(file.type) !== -1) return true;
+        // Fallback: some browsers report empty/octet-stream for .bmp; trust the extension.
+        var name = (file.name || '').toLowerCase();
+        return /\.(bmp|jpe?g|png)$/.test(name);
+      }
+
       async function addFiles(fileList) {
         var all = Array.from(fileList);
-        var images = all.filter(function (f) { return ACCEPTED_IMAGE.indexOf(f.type) !== -1; });
-        var videos = all.filter(function (f) { return f.type.indexOf('video/') === 0; });
+        var images = all.filter(isAcceptedImage);
+        var videos = all.filter(function (f) {
+          if (isAcceptedImage(f)) return false;
+          return f.type.indexOf('video/') === 0 || /\.(mp4|webm|mov|m4v|mkv|ogv)$/i.test(f.name || '');
+        });
         if (!images.length && !videos.length) return;
 
+        var failures = [];
         try {
           if (images.length) {
-            var newFrames = await Promise.all(images.map(loadFrame));
-            frames = frames.concat(newFrames);
-            render();
+            var results = await Promise.allSettled(images.map(loadFrame));
+            var ok = [];
+            results.forEach(function (r, i) {
+              if (r.status === 'fulfilled') ok.push(r.value);
+              else failures.push({ name: images[i].name, reason: r.reason });
+            });
+            if (ok.length) {
+              frames = frames.concat(ok);
+              render();
+            }
           }
-          for (var i = 0; i < videos.length; i++) {
-            var fps = clamp(parseInt(videoFpsInput.value, 10) || 10, 1, 60);
-            var maxFrames = Math.max(1, parseInt(maxFramesInput.value, 10) || 360);
-            var extracted = await extractVideoFrames(videos[i], fps, maxFrames);
-            frames = frames.concat(extracted);
-            render();
+          for (var v = 0; v < videos.length; v++) {
+            try {
+              var fps = clamp(parseInt(videoFpsInput.value, 10) || 10, 1, 60);
+              var maxFrames = Math.max(1, parseInt(maxFramesInput.value, 10) || 360);
+              var extracted = await extractVideoFrames(videos[v], fps, maxFrames);
+              frames = frames.concat(extracted);
+              render();
+            } catch (err) {
+              failures.push({ name: videos[v].name, reason: err });
+            }
           }
-        } catch (err) {
-          console.error(err);
-          alert('Failed to import: ' + err.message);
         } finally {
           hideExtractStatus();
         }
+
+        if (failures.length) {
+          console.error('Import failures:', failures);
+          alert(formatImportFailures(failures));
+        }
+      }
+
+      function formatImportFailures(failures) {
+        var names = failures.map(function (f) { return '• ' + f.name; }).join('\n');
+        var anyUnreadable = failures.some(function (f) {
+          var r = f.reason;
+          if (!r) return false;
+          var name = (r.name || '') + '';
+          var msg = (r.message || r + '').toLowerCase();
+          return name === 'NotReadableError' ||
+                 name === 'NotFoundError' ||
+                 msg.indexOf('could not be read') !== -1 ||
+                 msg.indexOf('permission') !== -1;
+        });
+        var header = 'Could not import ' + failures.length + ' file' + (failures.length > 1 ? 's' : '') + ':\n' + names;
+        if (anyUnreadable) {
+          header += '\n\nLikely causes:\n' +
+            '• File is in OneDrive but not downloaded locally — right-click it and choose "Always keep on this device", then retry.\n' +
+            '• File was moved or deleted after selection.\n' +
+            '• Another app has the file open or locked.';
+        }
+        return header;
       }
 
       function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 
       function loadFrame(file) {
         return new Promise(function (resolve, reject) {
-          var reader = new FileReader();
-          reader.onerror = function () { reject(reader.error); };
-          reader.onload = function () {
-            var img = new Image();
-            img.onload = function () {
-              resolve({
-                id: nextId++,
-                file: file,
-                dataUrl: reader.result,
-                image: img,
-                width: img.naturalWidth,
-                height: img.naturalHeight
-              });
-            };
-            img.onerror = function () { reject(new Error('Failed to decode ' + file.name)); };
-            img.src = reader.result;
+          var url = URL.createObjectURL(file);
+          var img = new Image();
+          img.onload = function () {
+            resolve({
+              id: nextId++,
+              file: file,
+              dataUrl: url,
+              image: img,
+              width: img.naturalWidth,
+              height: img.naturalHeight
+            });
           };
-          reader.readAsDataURL(file);
+          img.onerror = function () {
+            URL.revokeObjectURL(url);
+            var err = new Error('Could not decode "' + file.name + '". The file may be unreadable (OneDrive cloud-only, moved, or locked) or not a valid image.');
+            err.name = 'NotReadableError';
+            reject(err);
+          };
+          img.src = url;
         });
       }
 
