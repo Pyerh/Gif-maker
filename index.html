@@ -517,11 +517,13 @@
         var failures = [];
         try {
           if (images.length) {
-            var results = await Promise.allSettled(images.map(loadFrame));
+            var results = await loadImagesWithProgress(images, function (loaded, total) {
+              showStatus('Importing ' + loaded + '/' + total + '…', (loaded / total) * 100);
+            });
             var ok = [];
             results.forEach(function (r, i) {
-              if (r.status === 'fulfilled') ok.push(r.value);
-              else failures.push({ name: images[i].name, reason: r.reason });
+              if (r.ok) ok.push(r.frame);
+              else failures.push({ name: images[i].name, reason: r.err });
             });
             if (ok.length) {
               frames = frames.concat(ok);
@@ -540,13 +542,45 @@
             }
           }
         } finally {
-          hideExtractStatus();
+          hideStatus();
         }
 
         if (failures.length) {
           console.error('Import failures:', failures);
           alert(formatImportFailures(failures));
         }
+      }
+
+      // Loads N images with limited parallelism so we don't saturate the decoder,
+      // and emits a per-completion progress callback so the user sees a live counter.
+      function loadImagesWithProgress(files, onProgress) {
+        var concurrency = Math.min(6, files.length);
+        var total = files.length;
+        var loaded = 0;
+        var results = new Array(total);
+        var nextIdx = 0;
+        onProgress(0, total);
+
+        function worker() {
+          if (nextIdx >= total) return Promise.resolve();
+          var i = nextIdx++;
+          return loadFrame(files[i]).then(
+            function (frame) {
+              results[i] = { ok: true, frame: frame };
+            },
+            function (err) {
+              results[i] = { ok: false, err: err };
+            }
+          ).then(function () {
+            loaded++;
+            onProgress(loaded, total);
+            return worker();
+          });
+        }
+
+        var workers = [];
+        for (var w = 0; w < concurrency; w++) workers.push(worker());
+        return Promise.all(workers).then(function () { return results; });
       }
 
       function formatImportFailures(failures) {
@@ -597,16 +631,18 @@
         });
       }
 
-      // ---------- video extraction ----------
+      // ---------- shared status indicator (used by both image import and video extraction) ----------
 
-      function showExtractStatus(text, pct) {
+      function showStatus(text, pct) {
         extractStatus.classList.remove('hidden');
         extractText.textContent = text;
         extractBar.style.width = (pct || 0) + '%';
       }
-      function hideExtractStatus() {
+      function hideStatus() {
         extractStatus.classList.add('hidden');
       }
+
+      // ---------- video extraction ----------
 
       async function extractVideoFrames(file, fps, maxFrames) {
         var url = URL.createObjectURL(file);
@@ -616,7 +652,7 @@
         video.playsInline = true;
         video.src = url;
 
-        showExtractStatus('Loading ' + file.name + '…', 0);
+        showStatus('Loading ' + file.name + '…', 0);
 
         try {
           await new Promise(function (res, rej) {
@@ -663,7 +699,7 @@
               width: cw,
               height: ch
             });
-            showExtractStatus(
+            showStatus(
               'Extracting ' + file.name + ' — ' + (i + 1) + '/' + total,
               ((i + 1) / total) * 100
             );
@@ -718,9 +754,13 @@
           el.draggable = true;
           el.dataset.id = String(frame.id);
 
-          var img = document.createElement('img');
-          img.src = frame.dataUrl;
+          // Reuse the already-decoded Image instead of creating a new <img> that
+          // would re-fetch + re-decode the same blob URL.
+          var img = frame.image;
           img.alt = 'Frame ' + (idx + 1);
+          img.loading = 'lazy';
+          img.decoding = 'async';
+          if (img.parentNode) img.parentNode.removeChild(img);
 
           var index = document.createElement('span');
           index.className = 'index';
@@ -733,6 +773,7 @@
           remove.title = 'Remove frame';
           remove.addEventListener('click', function (e) {
             e.stopPropagation();
+            revokeFrameUrl(frame);
             frames = frames.filter(function (f) { return f.id !== frame.id; });
             render();
           });
@@ -774,9 +815,17 @@
       }
 
       clearBtn.addEventListener('click', function () {
+        frames.forEach(revokeFrameUrl);
         frames = [];
         render();
       });
+
+      function revokeFrameUrl(frame) {
+        if (frame && frame.dataUrl && typeof frame.dataUrl === 'string'
+            && frame.dataUrl.indexOf('blob:') === 0) {
+          try { URL.revokeObjectURL(frame.dataUrl); } catch (_) { /* ignore */ }
+        }
+      }
 
       // ---------- settings UI ----------
 
