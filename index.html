@@ -888,8 +888,10 @@
       }
 
       // Letterbox-fits a frame into the given context at (outWidth, outHeight).
+      // Fills the background white so transparent PNGs render with a white
+      // backdrop instead of leaking the canvas default / black.
       function drawFrameContained(ctx, frame, outWidth, outHeight) {
-        ctx.fillStyle = '#000';
+        ctx.fillStyle = '#fff';
         ctx.fillRect(0, 0, outWidth, outHeight);
         var scale = Math.min(outWidth / frame.width, outHeight / frame.height);
         var drawW = frame.width * scale;
